@@ -1,6 +1,6 @@
 #bibliotecas/funções de regressão
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
-from statsmodels.tsa.stattools import acf, pacf
+from statsmodels.tsa.stattools import acf, pacf, adfuller
 from statsmodels.tsa.arima_process import ArmaProcess
 from statsmodels.tsa.arima_model import ARMAResults
 from statsmodels.tsa.arima.model import ARIMA
@@ -9,6 +9,7 @@ import statsmodels.api as sm
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import csv
 #ignorar avisos que não são erros
 import warnings
 warnings.filterwarnings('ignore')
@@ -28,23 +29,36 @@ def yrange(start, stop, step):
 	plt.yticks(np.arange(start, stop, step))
 
 
-
 #atribui os valores do arquivo csv ao vetor arma
-arma = np.loadtxt('datapredict.csv', skiprows=1, delimiter=',')
+arma = pd.read_csv('historicowege.csv')
+#vamos deixar 30 dados para comparar com a previsão do modelo
+data_selector = (arma.index < len(arma)-30)
+arma_train = arma[data_selector].copy()
+arma_test = arma[~data_selector].copy()
+
+
+#transforma os dados em estacionários e pega o nível de diferenciação
+adf_test = adfuller(arma_train)
+i_diff = 0
+while (adf_test[1] > 0.05):
+	#print(f'p-value: {adf_test[1]}')
+	arma_train_diff = arma_train.diff().dropna()
+	adf_test = adfuller(arma_train_diff)
+	i_diff = i_diff + 1
+
+#print(i_diff)
+
 
 #pega o tamanho do arquivo e guarda numa variável
-size_array = len(arma)
+size_array = len(arma_train_diff)
 #define os valores limite do intervalo de confiança (1.96/√T)
 top_limit = 1.96/(size_array**(1/2))
 bottom_limit = -1.96/(size_array**(1/2))
 
-
 '''atribui os valores de lag à variável acf_values
 qstat = true significa que retornará também os valores do teste Ljung-Box e os p valores
 Retorna uma matriz em que a primeira linha são os valores de FAC, a segunda os valores de Ljung e a última os p valores'''
-acf_values = acf(arma, qstat=True, alpha=0.05)
-#print(acf_values) #printa a matriz
-#print('Número de lags: ', len(acf_values[0])-1) #-1 porque o 0 não conta
+acf_values = acf(arma_train_diff, qstat=True, alpha=0.05)
 
 ar_level = 0
 #para cada lag de 1 até o tamanho do vetor de lags, printe o valor na tela e, se estiver fora do intervalo de confiança, some 1 na variável para vermos o "nível" do MA
@@ -53,11 +67,10 @@ for lag in range(1, len(acf_values[0])):
 	if((acf_values[0][lag]>top_limit) or (acf_values[0][lag]<bottom_limit)):
 		ar_level=+1
 
-#print(ar_level)
+print('AR: ' + str(ar_level))
 
 
-pacf_values = pacf(arma, alpha=0.05)
-#print(pacf_values)
+pacf_values = pacf(arma_train_diff, alpha=0.05)
 
 ma_level = 0
 #para cada lag de 1 até o tamanho do vetor de lags, printe o valor na tela e, se estiver fora do intervalo de confiança, some 1 na variável para vermos o "nível" do MA
@@ -66,10 +79,10 @@ for lag in range(1, len(pacf_values[0])):
 	if((pacf_values[0][lag]>top_limit) or (pacf_values[0][lag]<bottom_limit)):
 		ma_level=+1
 
-#print(ma_level)
+print('MA: ' + str(ma_level))
 
 
-#Cria uma lista com vetores de duas posições (inicialmente zeradas) que serão os modelos ARMA que passarem no Ljung Box
+#Cria uma lista com vetores de duas posições (inicialmente zeradas) que serão os modelos arma_train_diff que passarem no Ljung Box
 validated_models = []
 
 #range(start, stop, step): stop em intervalo aberto. Preciso das combinações incluindo o 0
@@ -79,7 +92,7 @@ for ar in range(ar_level,-1,-1):
 			break
 
 		#estima o modelo ARIMA(ordem AR, ordem I, ordem MA)
-		model = ARIMA(arma, order=(ar, 0, ma))
+		model = ARIMA(arma_train, order=(ar, i_diff, ma))
 		#estima os parâmetros do modelo
 		results = model.fit()
 		#pega os resíduos
@@ -93,7 +106,7 @@ for ar in range(ar_level,-1,-1):
 			ljung_box = sm.stats.acorr_ljungbox(residuals, lags=[lag], return_df=True)
 			pvalue = ljung_box['lb_pvalue'].values[0]
 
-			#verifica se é menor que 0.05 (está 0.46 apenas como teste devido à minha base de dados)
+			#verifica se é menor que 0.05
 			if pvalue < 0.05:
 				pvalue_control = True
 				break
@@ -107,7 +120,7 @@ for ar in range(ar_level,-1,-1):
 			#print(bic_value)
 			validated_models.append([[ar,ma],bic_value])
 			
-print(validated_models)
+print('Modelos candidatos + BIC: '+ str(validated_models))
 
 #Variável que será atribuída o menor valor de BIC
 low_bic = 0
@@ -124,22 +137,26 @@ for i in range(0,len(validated_models)):
 			low_bic = validated_models[i][1]
 			final_model = validated_models[i][0]
 			
-print(low_bic)
-print(final_model)
+print('Menor BIC: ' + str(low_bic))
+print('Melhor modelo ARIMA: [' + str(final_model[0]) + ',' + str(i_diff) + ',' + str(final_model[1]) + ']')
 
-#refaz o modelo com os parâmetros corretos
-model = ARIMA(arma, order=(final_model[0], 0, final_model[1]))
+
+#agora estimamos o modelo real com os melhores parâmetros
+model = ARIMA(arma_train, order=(final_model[0], i_diff, final_model[1]))
 results = model.fit()
-
-predicted_value = results.forecast()[0]
-print(predicted_value)
+residuals = pd.DataFrame(results.resid)
 
 
-plt.plot(arma)
-#define o título
-plt.title('Simulador ARMA')
-#define o range do gráfico (início, final, escala)
-xrange(0, 260, 25)
-yrange(-1, 3, 0.5)
+#cria os gráficos
+train_graphic = plt.figure("Dados iniciais")
+plt.plot(arma_train)
+diff_graphic = plt.figure("Dados diferenciados")
+plt.plot(arma_train_diff)
+fig, ax = plt.subplots(1,2)
+residuals.plot(title='Resíduos', ax=ax[0])
+residuals.plot(title='Distribuição dos Resíduos', kind='kde', ax=ax[1])
+acf_res = plot_acf(residuals)
+pacf_res = plot_pacf(residuals)
 
-#plt.show()
+plt.show()
+
